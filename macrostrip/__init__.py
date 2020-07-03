@@ -1,66 +1,8 @@
-import enum
-from typing import cast, List, NamedTuple, Optional, TextIO, Tuple
+from typing import List, Optional, Tuple, Union
 
 
-class ParseState(enum.Enum):
-    NOT_IN_TARGET_MACRO = enum.auto()
-    IN_TARGET_IF = enum.auto()
-    IN_IF = enum.auto()
-    IN_ELSE = enum.auto()
-    IN_END = enum.auto()
-
-
-TRANSITIONS = {
-    ParseState.NOT_IN_TARGET_MACRO: {ParseState.IN_TARGET_IF,
-                                     ParseState.IN_IF,
-                                     ParseState.NOT_IN_TARGET_MACRO},
-    ParseState.IN_TARGET_IF: {ParseState.IN_TARGET_IF,
-                              ParseState.IN_IF,
-                              ParseState.IN_ELSE,
-                              ParseState.IN_END},
-    ParseState.IN_IF: {ParseState.IN_TARGET_IF,
-                       ParseState.IN_IF,
-                       ParseState.IN_ELSE,
-                       ParseState.IN_END},
-    ParseState.IN_ELSE: {ParseState.IN_TARGET_IF,
-                         ParseState.IN_IF,
-                         ParseState.IN_END},
-    ParseState.IN_END: {ParseState.NOT_IN_TARGET_MACRO,
-                        ParseState.IN_TARGET_IF,
-                        ParseState.IN_IF,
-                        ParseState.IN_ELSE,
-                        ParseState.IN_END}
-}
-
-
-def is_valid_transition(from_state: ParseState,
-                        to_state: ParseState) -> bool:
-    return to_state in TRANSITIONS[from_state]
-
-
-class MacroBlock:
-    start_line_num: int
-    else_line_num: Optional[int] = None
-    end_line_num: int
-    body: str = ""
-
-    def __init__(self, start_line: int, else_line: Optional[int],
-                 end_line: int, body: str) -> None:
-        self.start_line_num = start_line
-        self.else_line_num = else_line
-        self.end_line_num = end_line
-        self.body = body
-
-
-class IncompleteMacroBlock:
-    start_line_num: Optional[int] = None
-    else_line_num: Optional[int] = None
-    end_line_num: Optional[int] = None
-    body: str = ""
-
-    def to_complete(self) -> MacroBlock:
-        return MacroBlock(cast(int, self.start_line_num), self.else_line_num,
-                          cast(int, self.end_line_num), self.body)
+from .types import MacroBlock, ControlFlowBranch, ParseState
+from .types import IncompleteMacroBlock, GeneralTextIO
 
 
 GENERIC_MACRO_START = '#if'
@@ -68,7 +10,7 @@ GENERIC_MACRO_ELSE = '#else'
 GENERIC_MACRO_END = '#endif'
 
 
-def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
+def get_blocks(input: GeneralTextIO, macro: str) -> List[MacroBlock]:
     parse_stack: List[ParseState] = []
     blocks: List[MacroBlock] = []
     current_block = IncompleteMacroBlock()
@@ -95,7 +37,7 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
         return parse_stack.pop()
 
     def consume_target_if(block: IncompleteMacroBlock, line: str) -> None:
-        assert is_valid_transition(peek(), ParseState.IN_TARGET_IF)
+        assert ParseState.is_valid_transition(peek(), ParseState.IN_TARGET_IF)
         if not in_top_target():
             assert block.start_line_num is None
             assert block.else_line_num is None
@@ -104,13 +46,13 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
         push(ParseState.IN_TARGET_IF)
 
     def consume_generic_if(block: IncompleteMacroBlock, line: str) -> None:
-        assert is_valid_transition(peek(), ParseState.IN_IF)
+        assert ParseState.is_valid_transition(peek(), ParseState.IN_IF)
         if in_target():
             block.body += line
         push(ParseState.IN_IF)
 
     def consume_else(block: IncompleteMacroBlock, line: str) -> None:
-        assert is_valid_transition(peek(), ParseState.IN_ELSE)
+        assert ParseState.is_valid_transition(peek(), ParseState.IN_ELSE)
         if in_target():
             block.body += line
             if in_top_target():
@@ -120,7 +62,7 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
     def consume_end(block: IncompleteMacroBlock,
                     line: str) -> Optional[IncompleteMacroBlock]:
         current_state = peek()
-        assert is_valid_transition(current_state, ParseState.IN_END)
+        assert ParseState.is_valid_transition(current_state, ParseState.IN_END)
         is_in_target = in_target()
         is_top_target = in_top_target()
         pop()
@@ -162,7 +104,8 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
     return blocks
 
 
-def strip(input: TextIO, macro: str, comment: bool = False) -> Tuple[str, int]:
+def strip(input: GeneralTextIO, macro: str, comment: bool = False,
+          branch: ControlFlowBranch = ControlFlowBranch.IF) -> Tuple[str, int]:
     output_buffer = ""
     blocks = get_blocks(input, macro)
     input.seek(0)
@@ -170,9 +113,18 @@ def strip(input: TextIO, macro: str, comment: bool = False) -> Tuple[str, int]:
     lines_to_ignore = set()
     for block in blocks:
         lines_to_ignore.add(block.start_line_num)
-        if block.else_line_num is not None:
-            else_block_lines = range(block.else_line_num, block.end_line_num)
-            lines_to_ignore |= set(else_block_lines)
+
+        if block.has_else():
+            else_line_num = block.else_line()
+            if branch is ControlFlowBranch.IF:
+                body_lines = range(block.start_line_num,
+                                   else_line_num + 1)
+            elif branch is ControlFlowBranch.ELSE:
+                body_lines = range(else_line_num, block.end_line_num)
+            else:  # ControlFlowBranch.BOTH condition.
+                body_lines = range(block.start_line_num, block.end_line_num)
+            lines_to_ignore |= set(body_lines)
+
         lines_to_ignore.add(block.end_line_num)
 
     line_num = 0
@@ -187,7 +139,7 @@ def strip(input: TextIO, macro: str, comment: bool = False) -> Tuple[str, int]:
     return (output_buffer, len(blocks))
 
 
-def describe(input: TextIO, macro: str) -> str:
+def describe(input: GeneralTextIO, macro: str) -> str:
     output = ""
     blocks = get_blocks(input, macro)
 
@@ -199,8 +151,9 @@ def describe(input: TextIO, macro: str) -> str:
     return output
 
 
-def replace(handle: TextIO, macro: str, comment: bool = False) -> int:
-    new_text, num_blocks = strip(handle, macro, comment)
+def replace(handle: GeneralTextIO, macro: str, comment: bool = False,
+            branch: ControlFlowBranch = ControlFlowBranch.IF) -> int:
+    new_text, num_blocks = strip(handle, macro, comment, branch)
     handle.seek(0)
     handle.write(new_text)
     return num_blocks
