@@ -34,7 +34,7 @@ class IncompleteMacroBlock:
     end_line_num: Optional[int] = None
     body: str = ""
 
-    def as_complete(self) -> MacroBlock:
+    def to_complete(self) -> MacroBlock:
         return MacroBlock(cast(int, self.start_line_num), self.else_line_num,
                           cast(int, self.end_line_num), self.body)
 
@@ -109,7 +109,7 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
             block.body += line
             if is_top_target:
                 block.end_line_num = current_line_num
-                blocks.append(block.as_complete())
+                blocks.append(block.to_complete())
                 return IncompleteMacroBlock()
         return None
 
