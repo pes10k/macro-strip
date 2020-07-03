@@ -7,11 +7,35 @@ class ParseState(enum.Enum):
     IN_TARGET_IF = enum.auto()
     IN_IF = enum.auto()
     IN_ELSE = enum.auto()
+    IN_END = enum.auto()
 
 
-VALID_PRE_ELSE_STATES = {ParseState.IN_IF, ParseState.IN_TARGET_IF}
-VALID_PRE_END_STATES = {ParseState.IN_ELSE, ParseState.IN_IF,
-                        ParseState.IN_TARGET_IF}
+TRANSITIONS = {
+    ParseState.NOT_IN_TARGET_MACRO: {ParseState.IN_TARGET_IF,
+                                     ParseState.IN_IF,
+                                     ParseState.NOT_IN_TARGET_MACRO},
+    ParseState.IN_TARGET_IF: {ParseState.IN_TARGET_IF,
+                              ParseState.IN_IF,
+                              ParseState.IN_ELSE,
+                              ParseState.IN_END},
+    ParseState.IN_IF: {ParseState.IN_TARGET_IF,
+                       ParseState.IN_IF,
+                       ParseState.IN_ELSE,
+                       ParseState.IN_END},
+    ParseState.IN_ELSE: {ParseState.IN_TARGET_IF,
+                         ParseState.IN_IF,
+                         ParseState.IN_END},
+    ParseState.IN_END: {ParseState.NOT_IN_TARGET_MACRO,
+                        ParseState.IN_TARGET_IF,
+                        ParseState.IN_IF,
+                        ParseState.IN_ELSE,
+                        ParseState.IN_END}
+}
+
+
+def is_valid_transition(from_state: ParseState,
+                        to_state: ParseState) -> bool:
+    return to_state in TRANSITIONS[from_state]
 
 
 class MacroBlock:
@@ -46,6 +70,8 @@ GENERIC_MACRO_END = '#endif'
 
 def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
     parse_stack: List[ParseState] = []
+    blocks: List[MacroBlock] = []
+    current_block = IncompleteMacroBlock()
 
     def in_target() -> bool:
         return any([x is ParseState.IN_TARGET_IF for x in parse_stack])
@@ -57,9 +83,9 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
                 count += 1
         return count == 1
 
-    def peek() -> Optional[ParseState]:
+    def peek() -> ParseState:
         if len(parse_stack) == 0:
-            return None
+            return ParseState.NOT_IN_TARGET_MACRO
         return parse_stack[-1]
 
     def push(state: ParseState) -> None:
@@ -68,27 +94,23 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
     def pop() -> ParseState:
         return parse_stack.pop()
 
-    blocks: List[MacroBlock] = []
-    current_block = IncompleteMacroBlock()
-
     def consume_target_if(block: IncompleteMacroBlock, line: str) -> None:
+        assert is_valid_transition(peek(), ParseState.IN_TARGET_IF)
         if not in_top_target():
             assert block.start_line_num is None
-            assert block.body == ""
             assert block.else_line_num is None
             block.start_line_num = current_line_num
         block.body += line
         push(ParseState.IN_TARGET_IF)
 
     def consume_generic_if(block: IncompleteMacroBlock, line: str) -> None:
-        current_state = peek()
-        if current_state is not None:
+        assert is_valid_transition(peek(), ParseState.IN_IF)
+        if in_target():
             block.body += line
         push(ParseState.IN_IF)
 
     def consume_else(block: IncompleteMacroBlock, line: str) -> None:
-        current_state = peek()
-        assert current_state in VALID_PRE_ELSE_STATES
+        assert is_valid_transition(peek(), ParseState.IN_ELSE)
         if in_target():
             block.body += line
             if in_top_target():
@@ -98,12 +120,16 @@ def get_blocks(input: TextIO, macro: str) -> List[MacroBlock]:
     def consume_end(block: IncompleteMacroBlock,
                     line: str) -> Optional[IncompleteMacroBlock]:
         current_state = peek()
-        assert current_state in VALID_PRE_END_STATES
-        if current_state is ParseState.IN_ELSE:
-            pop()
+        assert is_valid_transition(current_state, ParseState.IN_END)
         is_in_target = in_target()
         is_top_target = in_top_target()
         pop()
+
+        # If we hit the end block from an else block, we need to push
+        # both the else and the if block off the stack, so the extra pop().
+        if current_state is ParseState.IN_ELSE:
+            pop()
+
         if is_in_target:
             assert block.start_line_num is not None
             block.body += line
